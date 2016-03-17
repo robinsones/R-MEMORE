@@ -1,0 +1,167 @@
+---
+title: "MEMORE"
+author: "Emily Robinson"
+date: "March 16, 2016"
+output: html_document
+---
+
+This function replicates the [MEMORE](http://afhayes.com/spss-sas-and-mplus-macros-and-code.html) macro for SPSS and SAS written by Montoya and Hayes. As they describe: 
+
+> It estimates the total, direct, and indirect effects of X on Y through one or more mediators M in the two-condition or two-occasion within-subjects/repeated measures design. In a path-analytic form using OLS regression as illustrated in Montoya and Hayes (2015), it implements the method described by Judd, Kenny, and McClelland (2001, Psychological Methods) and extended by Montoya and Hayes (2015) to multiple mediators. Along with an estimate of the indirect effect(s), MEMORE generates confidence intervals for inference about the indirect effect(s) using bootstrapping approach. 
+
+```{r echo = FALSE, warnings = FALSE, message = FALSE}
+library(broom)
+library(dplyr)
+library(boot)
+```
+
+```{r echo = FALSE}
+tidy.bootci <- function(x, estimate = FALSE) {
+  types <- c("normal", "basic", "student", "percent", "bca")
+  types <- intersect(types, names(x))
+  
+  ret <- plyr::ldply(x[types], function(m) {
+    # skip the "index of the order statistic" columns
+    if (ncol(m) == 5) {
+      m <- m[, c(1, 4, 5), drop = FALSE]
+    }
+    ret <- as.data.frame(m)
+    colnames(ret) <- c("level", "conf.low", "conf.high")
+    ret
+  }, .id = "method")
+  if (estimate) {
+    ret$estimate <- x$t0
+  }
+
+  ret
+}
+
+
+glance.bootci <- function(x) {
+  data.frame(estimate = x$t0, replications = x$R)
+}
+```
+The following equations are a path diagram to represent Judd et al. (2001) causal steps approach to mediation analysis in the case of two-condition within-participant analysis: 
+
+$M_{2i} - M_{1i} = \alpha + e_{M_i}$
+
+$Y_{2i} - Y_{1i} = c^{'} + b(M_{2i} - M_{1i}) + d[0.5(M_{1i} + M_{2i}) - \bar{0.5(M_1 + M_2)}] + e_{Y^*_i}$
+
+$Y_{2i} - Y_{1i} = c + e_{Y_i}$
+
+In keeping with the terminology of the paper and field, $a$ is the effect of the independent variable, X, on the mediating variable, M. $b$ is the effect of M on the dependent variable, Y. Their product, $ab$, which will be the statistic we will use in the boostrapping, is the indirect effect of X on Y through M. We need to create a function, `bs`, to create that statistic so we can input it into the boot function.
+
+```{r}
+bs <-  function(formula1, formula2, data, indices) {
+  d <- data[indices, ]
+  a <- (tidy(lm(formula1, data = d)))$estimate
+  b <- tidy(lm(formula2, data = d))$estimate[2]
+  indirect <- a*b
+  return(indirect)
+  }
+```
+
+Then we create the function that creates four extra variables we'll need for the regressions: `mdiff`, the difference between `M1`, the value of the mediating variable in Time 1, and `M2`, the value of the mediating variable in Time2; `ydiff`, the difference between `Y1`, the value of the dependent variable in Time 1, and `Y2`, the value of the dependent variable in Time2; and `Msum_cent`, which is the sum of the mediating variables `M1` and `M2` centered on their mean; and `const`, which equals 1 and is needed as we cannot run a regression with any independent variables.  
+```{r}
+
+Gen_Vars <- function(df, M1, M2, Y1, Y2) {
+  df1 <- df %>%
+    mutate(mdiff = M2 - M1) %>%
+    mutate(ydiff = Y2 - Y1) %>%
+    mutate(const = 1) %>%
+    mutate(Msum_cent = .5*(M1 + M2) - .5*(mean(M2) + mean(M1)))
+  return(df1)
+}
+```
+
+Now we can write the overall function, `mediate_ws`. This will return the estimate of the indirect effect and its boostrap confidence interval. It will return table showing the type of bootstrap, the confidence interval level, the lower and upper bounds of the confidence interval, and the estimate. The inputs are the dataset, the mediating variable at time 1, mediating variable at time 2, dependent variable at time 1, and dependent variable at time 2. 
+
+```{r}
+mediate_ws <- function(df, M1, M2, Y1, Y2){
+  New_Data <- Gen_Vars(df, M1, M2, Y1, Y2)
+  results <- boot(data = New_Data, statistic = bs, R = 10000, formula1 = mdiff ~ const, formula2 = ydiff ~ mdiff + Msum_cent)
+  tidy_ci <- tidy(boot.ci(results, conf = .95, type = "basic"), estimate = TRUE)
+  return(tidy_ci)
+  }
+```
+
+Now let's try it for our dataset! One thing to note: there is a small discrepancy between the datafile we have and the one they use for the paper. Row 9 Y2 should be 3.2, not 3.8, and Row 6 M2 should be 4.2, not 5.2. We fix that so we can compare our answers!
+
+```{r}
+`Copy.of.Dohle.&.Siegrist.2014.Study.1` <- read.csv("~/Dropbox/Thau_MarApr16_Experimental Design and Data Analysis/Session 4/Copy of Dohle & Siegrist 2014 Study 1.csv")
+Testing_Study <- `Copy.of.Dohle.&.Siegrist.2014.Study.1`
+Testing_Study$Y2[9] <- 3.2
+Testing_Study$M2[6] <- 4.2
+mediate_ws(Testing_Study, M1, M2, Y1, Y2)
+```
+
+That's very similar results as the paper, which reported a CI (-0.742, -0.206). The estimate is exactly the same, as it should be, while the confidence intervals are close. The confidence intervals will never be exactly the same for bootstrapping. 
+
+That was just the basic function though. For the SPSS macro, they have multiple options. Let's try implementing some of those, starting with being able to change the number of bootstrap samples, which bootstrap CI is calculated, and the confidence interval width. 
+
+```{r}
+mediate_ws_options <- function(df, M1, M2, Y1, Y2, Reps = 5000, CONF = .95, BSType = "basic"){
+  New_Data <- Gen_Vars(df, M1, M2, Y1, Y2)
+  results <- boot(data = New_Data, statistic = bs, R = Reps, formula1 = mdiff ~ const, formula2 = ydiff ~ mdiff + Msum_cent)
+  tidy_ci <- tidy(boot.ci(results, conf = CONF, type = BSType), estimate = TRUE)
+  return(tidy_ci)
+}
+
+```
+
+Now let's try this with our sample!
+
+```{r}
+mediate_ws_options(Testing_Study, M1, M2, Y1, Y2, Reps = 3000, CONF = c(.9, .95, .99), BSType = "bca")
+```
+
+How nice :)!
+```{r eval = FALSE, echo = FALSE}
+ED5 <- `Copy.of.Dohle.&.Siegrist.2014.Study.1`
+EDF <- ED5 %>%
+  mutate(Mdiff = M2 - M1) %>%
+  mutate(Ydiff = Y2 - Y1) %>%
+  mutate(Const = 1) %>%
+  mutate(Msumcent = .5*(M1 + M2) - .5*(mean(M2) + mean(M1)))
+
+results <- boot(data = EDF, statistic = bs, R = 1000, formula1 = Mdiff ~ Const, formula2 = Ydiff ~ Mdiff + Msumcent)
+boot.ci(results, type="bca")
+happy <-  function(df, M1, M2, Y1, Y2) {
+  df1 <- df %>%
+    mutate(mdiff = M2 - M1) %>%
+    mutate(ydiff = Y2 - Y1) %>%
+    mutate(const = 1) %>%
+    mutate(Msum_cent = .5*(M1 + M2) - .5*(mean(M2) + mean(M1)))
+  lm_IV_MV <- lm(mdiff ~ const, data = df1)
+  a <- tidy(lm_IV_MV)[1, 2]
+  lm_MV_DV <- lm(Ydiff ~ Mdiff + Msumcent, data = df1)
+  c_prime <- tidy(lm_MV_DV)[1, 2]
+  b <- tidy(lm_MV_DV)[2, 2]
+  d <- tidy(lm_MV_DV)[3, 2]
+  lm_IV_DV <- lm(Ydiff ~ Const, data = df1)
+  c <- tidy(lm_IV_DV)[1, 2]
+  indirect <- a*b
+  total <- c
+  direct <- c_prime
+  list1 <- c(indirect, direct, total)
+  return(list1)}
+  
+    lm_IV_MV <- lm(mdiff ~ const, data = Testing_Study)
+  a <- tidy(lm_IV_MV)[1, 2]
+  lm_MV_DV <- lm(Ydiff ~ Mdiff + Msumcent, data = Testing_Study)
+  c_prime <- tidy(lm_MV_DV)[1, 2]
+  b <- tidy(lm_MV_DV)[2, 2]
+  d <- tidy(lm_MV_DV)[3, 2]
+  lm_IV_DV <- lm(Ydiff ~ Const, data = df1)
+  c <- tidy(lm_IV_DV)[1, 2]
+  indirect <- a*b
+  total <- c
+  direct <- c_prime
+  list1 <- c(indirect, direct, total)
+  return(list1)}
+
+  LB_CI <- boot.ci(results, conf = CONF, type="bca")$bca[4]
+  UB_CI <- boot.ci(results, conf = CONF, type="bca")$bca[5]
+  Estimate <- boot.ci(results, type="bca")$t0
+  return(cbind(LB_CI, UB_CI, Estimate))
+```
