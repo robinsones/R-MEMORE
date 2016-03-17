@@ -54,8 +54,8 @@ In keeping with the terminology of the paper and field, $a$ is the effect of the
 ```{r}
 bs <-  function(formula1, formula2, data, indices) {
   d <- data[indices, ]
-  a <- (tidy(lm(formula1, data = d)))$estimate
-  b <- tidy(lm(formula2, data = d))$estimate[2]
+  a <- tidy(lm(formula1, data = d), quick = TRUE)$estimate
+  b <- tidy(lm(formula2, data = d), quick = TRUE)$estimate[2]
   indirect <- a*b
   return(indirect)
   }
